@@ -128,4 +128,15 @@ Created:
 
 ## 9. Commit and push
 
-The final documentation and ignore-rule changes are committed after this log is written and pushed to `origin/main`.
+Primary commit:
+
+| Action | Command | Exit | Key result |
+|---|---|---:|---|
+| Stage | `git add -A` | 0 | `.gitignore` and three docs staged; symlinks remained ignored |
+| Status | `git status --short` | 0 | `M .gitignore`, `A docs/baseline.md`, `A docs/experiment-plan.md`, `A docs/setup-log.md` |
+| Commit | `git commit -m "feat: craftax env setup, baseline anchor, experiment plan draft"` | 0 | Commit `aebb0e4`; 4 files changed, 226 insertions |
+| First push attempt | `git push` | interrupted | Stalled while WSL Git waited for usable HTTPS credentials |
+| Configure helper | `gh auth setup-git` | 0 | Reused the existing authenticated GitHub CLI session |
+| Push retry | `GIT_TERMINAL_PROMPT=0 git push` | 0 | `4c74aa6..aebb0e4 main -> main` |
+
+This setup-log update is committed and pushed separately from the primary environment/documentation commit.
