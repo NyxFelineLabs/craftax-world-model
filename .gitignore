@@ -6,3 +6,6 @@ logs/
 external/
 *.egg-info/
 .venv/
+data
+logs
+external
