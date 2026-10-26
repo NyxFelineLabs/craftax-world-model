@@ -23,11 +23,13 @@ The primary reproduction anchor is **69.66% reward at 1M environment steps on Cr
 - **Package source:** PyPI
 - **Package name:** `improving-transformers-world-model`
 - **Installed version:** `0.0.59`
-- **Install location:** `/root/miniconda3/envs/craftax-wm/lib/python3.11/site-packages`
+- **Install location:** `/root/miniconda3/envs/craftax-wm/lib/python3.10/site-packages` (environment rebuilt on Python 3.10; see `docs/setup-log.md` section 10)
 - **Import check:** `from improving_transformers_world_model import WorldModel` succeeded.
 - **Source checkout:** none required. The former `~/craftax-external/improving-twm` plan was replaced by the PyPI package.
 
-The direct PyPI install initially failed while building the environment-related `pufferlib` dependency: `pufferlib` attempted a CUDA extension build with a CUDA 11.5/13.0 mismatch. The TWM wheel and its runtime dependencies were installed instead, without modifying package source. `pufferlib` is not imported by `WorldModel`; it also requires `numpy<2.0`, which conflicts with the verified JAX/Craftax environment using NumPy 2.4.6.
+The direct PyPI install initially failed while building the environment-related `pufferlib` dependency: `pufferlib` attempted a CUDA extension build with a CUDA 11.5/13.0 mismatch. The TWM wheel and its runtime dependencies were installed instead, without modifying package source. `pufferlib` is not imported by `WorldModel`; it also requires `numpy<2.0`, which conflicts with the verified JAX/Craftax environment using NumPy 2.2.6.
+
+- **Runtime torch requirement:** TWM 0.0.59 instantiates `torch.nn.RMSNorm` (`world_model.py` lines 297, 411, 475), which exists only from PyTorch 2.4. Constructing `WorldModel` on the installed torch 2.1.2+cu121 raises `AttributeError: module 'torch.nn' has no attribute 'RMSNorm'`. Every published TWM release (0.0.1-0.0.59) uses `nn.RMSNorm`, so the model can currently be imported but not constructed in this environment. Recorded in `docs/setup-log.md` section 10.5.
 
 ## Starting configuration
 
