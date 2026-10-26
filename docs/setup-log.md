@@ -226,3 +226,55 @@ GPU state during the tests: RTX 3090, 24576 MiB total, 754 MiB in use before the
 ### 10.6 Status of this rebuild
 
 Steps 1-5 are verified: environment rebuild, local-wheel torch, GPU JAX, Craftax, Craftax_Baselines, TWM install and import, JAX/torch coexistence, and the Craftax smoke test. Step 6 is blocked at the TWM forward/backward test because the requested torch 2.1.2+cu121 lacks `torch.nn.RMSNorm`, which TWM 0.0.59 requires.
+
+## 11. torch 2.4.1+cu121 upgrade (TWM `nn.RMSNorm` requirement)
+
+Reason: TWM 0.0.59 instantiates `torch.nn.RMSNorm` (`world_model.py` lines 297, 411, 475), which exists only from PyTorch 2.4. Section 10.5 recorded that the model could be imported but not constructed on torch 2.1.2+cu121. Upgrading torch is a hard requirement of the pinned TWM version, approved explicitly by the project owner; the local 2.1.2 wheel was replaced.
+
+### 11.1 Upgrade steps
+
+| Action | Command | Exit | Key result |
+|---|---|---:|---|
+| Uninstall old torch | `pip uninstall -y torch torchvision torchaudio` | 0 | torch 2.1.2+cu121 removed; torchvision/torchaudio were not installed |
+| Install torch | `pip install "torch==2.4.1+cu121" --index-url https://download.pytorch.org/whl/cu121` | 0 | torch 2.4.1+cu121 with CUDA 12.1 wheels and the matching nvidia-*-cu12 12.1 runtime packages |
+| torch checks | `torch.__version__`, `torch.version.cuda`, `torch.cuda.is_available()`, `hasattr(torch.nn, 'RMSNorm')` | 0 | `2.4.1+cu121`, `12.1`, `True`, `RMSNorm True` |
+| CUDA matmul | 1024x1024 `x @ x` on `cuda` | 0 | `matmul OK` |
+
+CuDNN correction. The torch install pinned `nvidia-cudnn-cu12==9.1.0.70`, which removed the cuDNN that JAX needs; the first Craftax run after the upgrade failed:
+
+```text
+E cuda_dnn.cc:523] Loaded runtime CuDNN library: 9.1.0 but source was compiled with: 9.8.0. ...
+jaxlib._jax.XlaRuntimeError: FAILED_PRECONDITION: DNN library initialization failed.
+```
+
+`jax-cuda12-plugin` 0.6.2 requires `nvidia-cudnn-cu12<10.0,>=9.8`. cuDNN was restored to a JAX-compatible version with `pip install -U "nvidia-cudnn-cu12>=9.8,<10"` (exit 0) resulting in `nvidia-cudnn-cu12 9.27.0.42`. torch metadata pins 9.1.0.70, so `pip check` reports that single pin mismatch; cuDNN keeps compatibility within major version 9, and torch CUDA matmul, JAX/Craftax and TWM all run on 9.27.0.42.
+
+### 11.2 Re-verification
+
+| Check | Command | Exit | Result |
+|---|---|---:|---|
+| NumPy bridge | `x = torch.randn(4); x.numpy()` | 0 | `numpy bridge OK: <class 'numpy.ndarray'>`; the earlier `_ARRAY_API not found` warning is gone, because torch 2.4.1 supports NumPy 2.x |
+| JAX/torch coexistence | `import torch, jax`; CUDA matmul; `jax.devices()` | 0 | `torch cuda: True`, `jax devices: [CudaDevice(id=0)]`, `torch after jax import: OK`; no CUDA initialization conflict |
+| Craftax smoke (100 steps) | `Craftax-Symbolic-v1` rollout | 0 | `craftax step OK, reward 0.0 obs shape (8268,)` |
+| TWM signature | `inspect.signature(WorldModel.__init__)` | 0 | See `docs/baseline.md`; `dim`, `depth`, `block_size` are not top-level arguments |
+| TWM supplied script | `WorldModel(image_size=63, patch_size=7, channels=3, dim=512, depth=4, block_size=81)` | 1 | `TypeError: WorldModel.__init__() got an unexpected keyword argument 'dim'` |
+| TWM README-faithful fwd+bwd | README construction + `state = torch.randn(2, 3, 20, 63, 63, device="cuda")`, `loss.backward()`, AdamW step | 0 | `TWM fwd+bwd OK, loss 11.682136535644531 peak MB 7541.180416` |
+
+The official README example (PyPI long description for 0.0.59) constructs the model with nested dictionaries:
+
+```python
+world_model = WorldModel(
+    image_size = 63,
+    patch_size = 7,
+    channels = 3,
+    transformer = dict(dim = 512, depth = 4, block_size = 81),
+    tokenizer = dict(dim = 7 * 7 * 3, distance_threshold = 0.5)
+)
+state = torch.randn(2, 3, 20, 63, 63)  # batch, channels, time, height, width
+loss = world_model(state)
+loss.backward()
+```
+
+The supplied script passed `dim`, `depth` and `block_size` as top-level keywords and fed integer token ids of shape `(2, 81)`; neither matches this API (`forward` expects float images `(b, c, t, h, w)` or integer token ids `(b, t, h, w)` with `t > 1`). The README form was used instead, unmodified.
+
+Final `pip check` (exit 1) lists only: `pufferlib` and `accelerate` not installed, six packages whose metadata asks for `torch>=2.5`/`>=2.9` (`torch-einops-utils`, `x-ppo`, `hyper-connections`, `mean-conc-beta`, `accelerated-scan`), and the torch/cuDNN pin above. None of these affected the verified runs. No training was started; the longest run in this work is the 100-step Craftax smoke test.
