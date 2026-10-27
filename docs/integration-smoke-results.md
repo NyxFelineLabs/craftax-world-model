@@ -21,7 +21,7 @@ Scope: mechanism + measured cost only. No convergence was expected or evaluated.
 | TWM params | 115.53 M |
 | Imagined rollout | K = 8 frames |
 | PPO fallback | 8 envs x 32 steps = 256 transitions, 4 epochs, 8 minibatches, 1 update |
-| Warmup (excluded from timing) | 1 full iteration, 248.04 s |
+| Warmup (excluded from timing) | 2 full iterations, 248.04 s total |
 | Measured iterations | 1000 |
 
 The warmup covers JAX/XLA compilation, cuDNN autotune, and the first tokenizer
