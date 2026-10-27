@@ -53,11 +53,17 @@ import jax
 import jax.numpy as jnp
 
 import torch
+import torch.nn.functional as F
 
 from craftax.craftax_env import make_craftax_env_from_name
 
 from improving_transformers_world_model import Agent, WorldModel
-from improving_transformers_world_model.agent import MemoriesWithNextState, Memory
+from improving_transformers_world_model.agent import (
+    MemoriesWithNextState,
+    Memory,
+    calc_entropy,
+    get_log_prob,
+)
 from improving_transformers_world_model.world_model import (
     NearestNeighborTokenizer,
     pack_one_with_inverse,
@@ -92,7 +98,44 @@ class CompatAgent(Agent):
     HL-Gauss critic and reproduces the upstream loss shape, but omits the
     upstream value-clipping branch (which passed scalar values to the HL-Gauss
     logits loss). Third-party source is untouched.
+
+    It also corrects the sign of the PPO surrogate term. TWM 0.0.59 returns
+    +min(surr1, surr2) - beta*entropy from Agent.policy_loss; minimizing that
+    expression reduces the log-probability of positive-advantage actions and
+    drives the policy to a collapsed arbitrary action. The corrected loss is
+    -min(surr1, surr2) - beta*entropy. This is a harness-side compatibility fix;
+    the installed package source is untouched.
     """
+
+    def policy_loss(
+        self,
+        states,
+        actions,
+        old_log_probs,
+        values,
+        returns,
+        world_model_embeds=None,
+    ):
+        self.actor.train()
+
+        batch = values.shape[0]
+        advantages = F.layer_norm(returns - values, (batch,))
+
+        actor_critic_input, _ = self.impala(states)
+        action_logits = self.actor(
+            actor_critic_input, world_model_embed=world_model_embeds
+        )
+
+        prob = action_logits.softmax(dim=-1)
+        log_probs = get_log_prob(action_logits, actions)
+        ratios = (log_probs - old_log_probs).exp()
+
+        clip = self.actor_eps_clip
+        surr1 = ratios * advantages
+        surr2 = ratios.clamp(1.0 - clip, 1.0 + clip) * advantages
+
+        action_entropy = calc_entropy(prob)
+        return -torch.min(surr1, surr2) - self.actor_beta_s * action_entropy
 
     def critic_loss(self, states, old_values, returns):
         self.critic.train()
@@ -311,12 +354,15 @@ def obs_to_torch(obs_np, device):
     return t.permute(0, 3, 1, 2).float().contiguous()
 
 
-def policy_act(agent, obs_np, device):
+def policy_act(agent, obs_np, device, return_logits=False):
     with torch.no_grad():
         x = obs_to_torch(obs_np, device)
         feat, _ = agent.impala(x)
         actions, log_probs = agent.actor(feat, sample_action=True)
-    return actions, log_probs
+        if not return_logits:
+            return actions, log_probs
+        logits = agent.actor(feat)
+    return actions, log_probs, logits
 
 
 def build_agent(num_actions, device):
@@ -536,12 +582,25 @@ def eval_policy(agent, args, step_batched, reset_batched, device, rng,
     metrics_list = []
     counts = {b: 0 for b in BUCKETS}
     action_counts = np.zeros(17, dtype=np.int64)
+    mode_counts = np.zeros(17, dtype=np.int64)
+    policy_entropies = []
 
     for _ in range(horizon):
         obs_np = np.asarray(jax.device_get(obs))
-        actions, _ = policy_act(agent, obs_np, device)
+        actions, _, logits = policy_act(agent, obs_np, device, return_logits=True)
         act_np = actions.detach().cpu().numpy().astype(np.int32)
         action_counts += np.bincount(act_np, minlength=17)
+        with torch.no_grad():
+            probs = logits.softmax(dim=-1)
+            mode_counts += np.bincount(
+                probs.argmax(dim=-1).detach().cpu().numpy().astype(np.int32),
+                minlength=17,
+            )
+            policy_entropies.append(
+                np.asarray(
+                    calc_entropy(probs).detach().cpu().numpy(), dtype=np.float32
+                )
+            )
         rng, key = jax.random.split(rng)
         next_obs, state, reward, done, metrics = step_batched(
             jax.random.split(key, num_envs), state, jnp.asarray(act_np)
@@ -580,6 +639,10 @@ def eval_policy(agent, args, step_batched, reset_batched, device, rng,
     action_probs = action_counts / max(int(action_counts.sum()), 1)
     action_entropy = float(-np.sum(action_probs[action_probs > 0] *
                                    np.log(action_probs[action_probs > 0])))
+    mode_probs = mode_counts / max(int(mode_counts.sum()), 1)
+    mode_entropy = float(-np.sum(mode_probs[mode_probs > 0] *
+                                 np.log(mode_probs[mode_probs > 0])))
+    total_actions = max(int(action_counts.sum()), 1)
     all_lengths = episode_lengths + [int(v) for v in current_age if v > 0]
 
     return dict(
@@ -601,7 +664,14 @@ def eval_policy(agent, args, step_batched, reset_batched, device, rng,
         final_timestep_mean=float(flat["timestep"].max(axis=0).mean()),
         episodes_finished=int(len(episode_lengths)),
         action_counts=[int(v) for v in action_counts],
+        mode_counts=[int(v) for v in mode_counts],
+        noop_fraction=float(action_counts[0] / total_actions),
+        mode_noop_fraction=float(mode_counts[0] / total_actions),
         action_entropy=action_entropy,
+        mode_entropy=mode_entropy,
+        policy_entropy_mean=float(
+            np.mean(np.concatenate(policy_entropies, axis=0))
+        ),
         event_counts=counts,
         steps=num_envs * horizon,
     )
@@ -958,7 +1028,9 @@ def main():
                 f"tier {mech['craft_tier_max']} | ach {mech['achievements_max']} | "
                 f"kills {mech['kills_max']} | "
                 f"coverage {mech['exploration_coverage_mean']:.3f} | "
-                f"survival {mech['survival_steps_mean']:.1f}",
+                f"survival {mech['survival_steps_mean']:.1f} | "
+                f"noop {mech['noop_fraction']:.1%} | "
+                f"entropy {mech['policy_entropy_mean']:.2f}",
                 flush=True,
             )
             print(

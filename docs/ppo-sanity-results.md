@@ -2,7 +2,9 @@
 
 Date: 2026-10-27
 
-Status: **complete; Step 3 result = Case C (partial)**.
+Status: **complete; Step 3 result = Case C (partial)**.  The TWM integration
+NOOP collapse it identified has since been diagnosed and repaired; see the
+post-repair addendum at the end of this file.
 
 Evidence labels: timings and metrics below are **command-verified** from
 `~/craftax-workspace/logs/ppo_baseline_sanity.json`; API/content claims marked
@@ -182,8 +184,9 @@ implemented yet.  The specific points needing rework are:
    recipe transitions on a fixed, balanced dataset.  If it does not, the
    architecture hypothesis is false.
 
-`docs/method-design.md` now carries a pending-sanity-check status reflecting
-this result.
+`docs/method-design.md` carries the corresponding status.  It was updated
+from "pending sanity check" to "TWM integration repaired, parity with pure
+PPO" once the addendum at the end of this file was measured.
 
 ## 7. Artifacts
 
@@ -315,3 +318,51 @@ is the empirical entropy of the sampled action histogram.
 - Causal explanation for the remaining tier-0 recipe failure: **inferred**;
   the present data cannot separate sparse reward, exploration, and PPO
   budget/hyperparameters.
+
+## Post-repair addendum: repaired TWM vs pure PPO (1M steps)
+
+Added after the TWM integration NOOP collapse was diagnosed and fixed
+(`docs/twm-crash-diagnosis.md`).  Sections 1-7 above are the historical Case C
+analysis and are preserved unchanged.  The TWM rows in those tables are the
+pre-repair diagnostic and are superseded by the "repaired TWM" column here.
+
+Root cause of the collapse: an inverted PPO surrogate sign in TWM 0.0.59's
+`Agent.policy_loss` (it returns `min(surr1, surr2) - beta*entropy` and
+`learn` minimizes it, instead of subtracting the surrogate).  The harness now
+overrides only that method; no third-party source was changed.  With the
+corrected sign the TWM policy no longer collapses to NOOP.
+
+Comparison at 1M environment steps, single seed 0, same harness:
+
+| Metric | Repaired TWM 1M | Pure PPO 1M |
+|---|---:|---:|
+| Final reward/step | +0.03015 | +0.03095 |
+| Last-10 reward/step | +0.02829 | +0.02927 |
+| Best reward/step | +0.03610 at 900k | +0.03640 at 860k |
+| Final NOOP | 1.35% | 1.20% |
+| Last-10 NOOP | 1.44% | 0.90% |
+| Final policy entropy | 2.010 | 2.019 |
+| Last-10 policy entropy | 2.138 | 1.941 |
+| Final coverage | 0.250% | 0.311% |
+| Last-10 coverage | 0.344% | 0.348% |
+| Best coverage | 0.659% at 750k | 0.464% at 920k |
+| Final tier / best tier | 0 / 1 | 0 / 1 |
+| Final achievements / best | 6 / 9 at 900k | 6 / 9 at 210k |
+| Crafting-labelled eval transitions | 112/1,992 = 5.62% | 127/1,992 = 6.38% |
+| Deterministic action mode | DO for all 2,000 | DO for all 2,000 |
+| Runtime | 104.33 min (shared GPU) | 34.36 min |
+
+Interpretation:
+
+- The repaired TWM is at **parity with pure PPO**, not better.  The differences
+  are small, contradictory across metrics, and from one seed.
+- TWM is slightly higher on last-10 policy entropy (2.138 vs 1.941) and best
+  coverage (0.659% vs 0.464%); slightly lower on final coverage and worse on
+  last-10 NOOP.
+- Neither method completes a tool recipe or reaches final tier > 0.
+- **No world-model mechanism advantage is demonstrated**, so the world-model
+  route must not be the headline mechanism for CMS-WM on this evidence.
+
+This resolves the "fix and characterize the TWM integration first" item in
+Section 6; the TWM harness is no longer in a collapsed state.  The remaining
+CMS-WM re-argument requirements in Section 6 are unchanged.

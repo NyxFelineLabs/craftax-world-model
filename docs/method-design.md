@@ -2,27 +2,31 @@
 
 Date: 2026-10-27
 
-## Status: pending sanity check
+## Status: TWM integration repaired, parity with pure PPO; CMS-WM still unsupported
 
-**Updated after the pure PPO control run in `docs/ppo-sanity-results.md`.**
+**Updated after the TWM NOOP-collapse repair in `docs/twm-crash-diagnosis.md`.**
+The pure PPO control (`docs/ppo-sanity-results.md`) established that the
+earlier diagnostic collapse was an integration bug, and that bug is now fixed.
 The material below is preserved as the pre-sanity design draft, not as an
-implementation-ready method.  Its central empirical premise did not survive
-the control experiment.
+implementation-ready method.
 
-- Pure PPO did **not** reproduce the TWM harness's NOOP/entropy collapse:
-  final NOOP was 1.2%, policy entropy 2.019 nats, and reward +0.03095/step.
-- Pure PPO still failed broad exploration and recipe progression: coverage
-  0.311%, final tier 0, and no tool in inventory.
-- The Step 3 result is therefore **Case C (partial)**.
-- The earlier 0.091% crafting-event rate was measured under a collapsed TWM
-  policy.  Pure PPO produced inventory-changing transitions at 6.38% in its
-  final evaluation, so "rare-event data starvation" is not a general property
-  of Craftax or the harness.
+- The collapse was an inverted PPO surrogate sign in TWM 0.0.59's
+  `Agent.policy_loss`; the harness now overrides only that method.  No
+  third-party source was modified.
+- After the repair, TWM passes behavioral sanity at both 100k and 1M steps:
+  final NOOP 1.35%, policy entropy 2.010 nats, reward +0.03015/step.
+- Pure PPO under the same harness: NOOP 1.20%, entropy 2.019, reward
+  +0.03095/step.  The two are effectively tied at 1M steps; the single-seed
+  differences are small and contradictory across metrics.
+- Neither method completes a tool recipe or reaches final tier > 0.
+- **No world-model mechanism advantage is demonstrated.**  TWM must not be the
+  headline mechanism on the strength of this result.
 
-What must be re-argued before CMS-WM can be implemented:
+What must still be re-argued before CMS-WM can be implemented:
 
 1. Separate resource pickup from successful recipe completion.  Wood/sapling
-   changes were common; a completed tool recipe remained absent.
+   changes were common (5-6% of eval transitions for both methods); a
+   completed tool recipe remained absent.
 2. Justify a world-model intervention against both a pure PPO control and a
    repaired TWM control, not against the collapsed diagnostic policy.
 3. Treat the tokenizer/transformer attribution as unconfirmed.  A pure PPO
@@ -32,10 +36,15 @@ What must be re-argued before CMS-WM can be implemented:
 5. Demonstrate that the remaining failure is a WM representation or planning
    problem rather than sparse reward, credit assignment, or a 1M-step budget.
 
+If method work continues, start from the PPO control and target recipe-level
+credit assignment or explicit game-mechanic priors; do not claim a world-model
+advantage that the measurements do not show.
+
 Do not implement CMS-WM on the basis of the earlier diagnostic alone.
 
-Input evidence: `docs/diagnostic-results.md`, `docs/ppo-sanity-results.md`, and
-the two 1M-step JSON artifacts in `~/craftax-workspace/logs/`.
+Input evidence: `docs/diagnostic-results.md`, `docs/ppo-sanity-results.md`,
+`docs/twm-crash-diagnosis.md`, and the 1M-step JSON artifacts in
+`~/craftax-workspace/logs/`.
 
 This document proposes a **new domain-specific world model**, not an incremental loss or tokenizer tweak on top of the ICML TWM. The diagnosis first identifies which failures are real, then each proposed component is tied to one of those measurements.
 
