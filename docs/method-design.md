@@ -2,18 +2,51 @@
 
 Date: 2026-10-27
 
-Input evidence: `docs/diagnostic-results.md` and the 1M-step diagnostic JSON in `~/craftax-workspace/logs/`.
+## Status: pending sanity check
+
+**Updated after the pure PPO control run in `docs/ppo-sanity-results.md`.**
+The material below is preserved as the pre-sanity design draft, not as an
+implementation-ready method.  Its central empirical premise did not survive
+the control experiment.
+
+- Pure PPO did **not** reproduce the TWM harness's NOOP/entropy collapse:
+  final NOOP was 1.2%, policy entropy 2.019 nats, and reward +0.03095/step.
+- Pure PPO still failed broad exploration and recipe progression: coverage
+  0.311%, final tier 0, and no tool in inventory.
+- The Step 3 result is therefore **Case C (partial)**.
+- The earlier 0.091% crafting-event rate was measured under a collapsed TWM
+  policy.  Pure PPO produced inventory-changing transitions at 6.38% in its
+  final evaluation, so "rare-event data starvation" is not a general property
+  of Craftax or the harness.
+
+What must be re-argued before CMS-WM can be implemented:
+
+1. Separate resource pickup from successful recipe completion.  Wood/sapling
+   changes were common; a completed tool recipe remained absent.
+2. Justify a world-model intervention against both a pure PPO control and a
+   repaired TWM control, not against the collapsed diagnostic policy.
+3. Treat the tokenizer/transformer attribution as unconfirmed.  A pure PPO
+   policy reached tier 0 without any world model.
+4. Define a recipe-level success metric and an offline prediction gate before
+   proposing closed-loop benefit.
+5. Demonstrate that the remaining failure is a WM representation or planning
+   problem rather than sparse reward, credit assignment, or a 1M-step budget.
+
+Do not implement CMS-WM on the basis of the earlier diagnostic alone.
+
+Input evidence: `docs/diagnostic-results.md`, `docs/ppo-sanity-results.md`, and
+the two 1M-step JSON artifacts in `~/craftax-workspace/logs/`.
 
 This document proposes a **new domain-specific world model**, not an incremental loss or tokenizer tweak on top of the ICML TWM. The diagnosis first identifies which failures are real, then each proposed component is tied to one of those measurements.
 
-## 0. What the diagnostic actually established
+## 0. What the TWM diagnostic observed (superseded as a method premise)
 
-### Established by measurement
+### Established for that run
 
 1. **The WM optimizes its training loss.** Training loss fell from 13.3413 to 2.0474, and held-out normal-frame error fell from 5.5648 to 0.4040 (-92.7%).
 2. **A stable mechanic gradient remains.** At the final checkpoint, crafting error was 0.5291 versus 0.4040 normal (1.31x); combat was 0.5035 (1.25x). Over the last ten checkpoints, craft/normal and combat/normal were both 1.54x.
 3. **Closed-loop behavior is unstable and usually degenerate.** Final evaluation used NOOP for all 2,000 actions. Action entropy was below 0.01 at 74/100 checkpoints and above 1.0 at only 8/100. Deterministic modes changed repeatedly, and coverage peaked at 38.25/4,096 tiles (0.93%) before falling back to one tile at the end.
-4. **Crafting experience is almost absent.** A 100,000-transition training audit contained 91 crafting events (0.091%), versus 3,925 exploration (3.93%) and 18,307 combat-labelled (18.31%) transitions. Final inventory was all zero; the maximum inventory ever observed across checkpoint evaluations was wood=2 and sapling=3, with no tool of any kind.
+4. **Crafting experience was almost absent under the collapsed TWM policy.** A 100,000-transition training audit contained 91 crafting events (0.091%), versus 3,925 exploration (3.93%) and 18,307 combat-labelled (18.31%) transitions. Final inventory was all zero; the maximum inventory ever observed across checkpoint evaluations was wood=2 and sapling=3, with no tool of any kind. This rate did not replicate under pure PPO.
 5. **Mechanic progress never starts.** Crafting tier was 0 at every checkpoint. Achievements reached 5 at one checkpoint but ended at 0. No kill achievement was ever obtained.
 
 ### Not established
@@ -28,15 +61,15 @@ The design below therefore has two jobs: (a) make sparse mechanic transitions re
 
 1. **Factor the latent by game semantics, not just by image patches.** Inventory counts, tool tier, achievements, vitals, entities, and map occupancy have different transition rules and should not be forced through one undifferentiated patch-code stream.
 2. **Use the simulator's mechanics as structure, not as test-time input.** Craftax recipes form a directed acyclic prerequisite graph; achievements are monotone; inventory counts are non-negative integers; the map has 4-neighbour topology. These priors can constrain predictions while the deployed model still receives only pixels and actions.
-3. **Treat rare events as first-class training targets.** Crafting is 0.091% of the observed training stream. Uniform pixel reconstruction will spend almost all capacity on grass and walls. Event-balanced replay and event-specific losses are required.
+3. **Treat rare events as first-class training targets.** In the collapsed TWM run, crafting was 0.091% of the training stream; the pure PPO control produced 6.38% inventory-changing evaluation transitions, so this is not a general Craftax data rate. The remaining rare event is successful recipe completion, which still needs event-balanced measurement and replay.
 4. **Separate model evaluation from policy quality.** The next experiment must first demonstrate that mechanic transitions can be predicted on a fixed, mechanic-balanced dataset. Only then should closed-loop reward be used to judge the model.
 5. **Keep a baseline-compatible pixel path.** The visual encoder can reuse the TWM patch tokenizer or a learned discrete encoder. This preserves a controlled comparison and makes each new component ablatable.
 
-## 2. Candidate A (recommended): Craftax Mechanic-State World Model (CMS-WM)
+## 2. Candidate A (pre-sanity draft, on hold): Craftax Mechanic-State World Model (CMS-WM)
 
 ### Failure mode addressed
 
-Crafting had the highest final held-out error (0.5291, 1.31x normal; 1.54x over the last ten checkpoints), yet the behavior policy produced only 91 crafting events in a 100,000-transition audit and never left tier 0. The model has both a rare-event learning problem and a representation problem: a generic patch token is a poor prior for an integer inventory count or a monotone achievement bit.
+Crafting had the highest final held-out error (0.5291, 1.31x normal; 1.54x over the last ten checkpoints), yet the behavior policy produced only 91 crafting events in a 100,000-transition audit and never left tier 0. That co-occurrence was real in the TWM run but did not generalize: pure PPO produced many more inventory-changing events yet still finished at tier 0. The remaining representation hypothesis is therefore unproven.
 
 ### Game prior
 
@@ -199,24 +232,25 @@ ERCM replaces generic patch tokens for the combat-relevant part of the scene wit
 
 Engineering estimate, **not measured**: 300-500 lines, +5-8 M parameters, +0.5-1 GB VRAM, and roughly 15% additional training time.
 
-## 5. Priority and recommendation
+## 5. Priority and recommendation (provisional)
 
 | Rank | Candidate | Why this rank | Main risk |
 |---:|---|---|---|
-| 1 | CMS-WM | Directly targets the highest and most persistent error bucket and the 0.091% crafting data rate; recipe DAG gives a strong domain prior | Needs a behavior/data-collection gate before closed-loop claims |
+| 1 | CMS-WM | Directly targets the highest and most persistent error bucket; recipe DAG gives a strong domain prior | Its starvation premise was weakened by pure PPO; needs a new recipe-level justification |
 | 2 | TFM | Final coverage was one tile; persistent topology is a clean, separable fix | Map memory cannot by itself stop a NOOP policy |
 | 3 | ERCM | Combat error is second and no kill outcome exists | Combat has even less outcome data; could be premature |
 
-**Recommendation: build CMS-WM first, as an offline prediction experiment.** Do not begin with a full closed-loop reward run. First collect a fixed mechanic-balanced dataset with a controlled exploratory behavior policy, train baseline TWM and CMS-WM offline on exactly that dataset, and compare per-bucket prediction and event metrics. If CMS-WM cannot beat the baseline under identical data, the architecture hypothesis is false and a closed-loop run would not be interpretable.
+**Recommendation on hold: do not build CMS-WM yet.** The pure PPO sanity
+control invalidated the earlier claim that the failure was primarily a
+TWM-specific rare-event problem.  First debug the TWM integration's policy
+collapse, quantify successful recipe transitions rather than raw inventory
+changes, and establish a pure PPO baseline that either explores adequately or
+shows a reproducible sample-budget limit.  Only after those controls may
+CMS-WM be re-argued as an offline prediction experiment.
 
-The proposed first gate is deliberately narrow:
-
-1. Stabilize data collection so action entropy is not near zero for most checkpoints.
-2. Verify at least 1% crafting events in a 100k audit, versus the current 0.091%.
-3. Train baseline and CMS-WM offline on the same fixed dataset.
-4. Only then run closed-loop comparisons.
-
-This gate is part of the design, not an optional engineering detail. The 1M diagnostic showed that a model can reduce loss while the policy never produces the events needed to test mechanic understanding.
+The earlier first gate (at least 1% labelled crafting events) was satisfied by
+pure PPO at 6.38%, yet recipe progression still failed.  That gate is therefore
+insufficient and must be replaced by a cookbook-recipe success gate.
 
 ## 6. Why this fits IEEE Transactions on Games
 
@@ -224,7 +258,12 @@ The contribution is not "a slightly better generic world model". It is a game-me
 
 The evaluation should still report the paper's 1M-step, Craftax-Classic reward anchor, but only after the official TWM protocol is reproduced or the comparison is explicitly labelled as a different harness. The diagnostic baseline here is not 69.66%, so the paper must not claim a direct win over that number. A defensible protocol is: same observation/action interface, same 1M-step budget, at least 3 seeds for the final comparison, per-bucket prediction curves, mechanic progress curves, and an official-protocol baseline alongside the diagnostic baseline.
 
-The scientific story is stronger than an incremental module: the 1M run demonstrates that a pixel world model can fit its loss while the agent fails to generate the rare events that matter. CMS-WM responds with a factored mechanic state and a recipe-constrained event model; TFM and ERCM are staged extensions for exploration and combat. This is a testable, game-specific thesis rather than an architecture-name contribution.
+The pre-sanity scientific story was that a pixel world model could fit its
+loss while the agent failed to generate the rare events that matter.  The pure
+PPO control weakens that story: a policy without any world model generated far
+more inventory-changing events and still failed recipe progression.  CMS-WM,
+TFM, and ERCM remain possible game-specific hypotheses, but none is currently
+supported as a method contribution without the new controls described above.
 
 ## 7. Evidence and scope labels
 
