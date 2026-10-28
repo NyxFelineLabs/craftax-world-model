@@ -1,50 +1,47 @@
 # Data-Driven World-Model Design for Craftax
 
-Date: 2026-10-27
+Date: 2026-10-28
 
-## Status: TWM integration repaired, parity with pure PPO; CMS-WM still unsupported
+## Status: calibration complete — Case A (reward-shaping variant)
 
-**Updated after the TWM NOOP-collapse repair in `docs/twm-crash-diagnosis.md`.**
-The pure PPO control (`docs/ppo-sanity-results.md`) established that the
-earlier diagnostic collapse was an integration bug, and that bug is now fixed.
-The material below is preserved as the pre-sanity design draft, not as an
-implementation-ready method.
+The task calibration in `docs/task-calibration.md` found a strong single-seed
+candidate separation under the predeclared screen: reward-shaped Pixels. With
+the checkpoint evaluation key schedule aligned, TWM and PPO both reached tier
+> 0 at 10/20 checkpoints. TWM's last-10 mean reward was +0.05419 versus
++0.04249 and mean coverage was 1.126% versus 0.644%. This is a candidate
+separation, not confirmation of a general or causal world-model benefit. It
+comes from one seed and a shaping reward that changes the task objective.
 
-- The collapse was an inverted PPO surrogate sign in TWM 0.0.59's
-  `Agent.policy_loss`; the harness now overrides only that method.  No
-  third-party source was modified.
-- After the repair, TWM passes behavioral sanity at both 100k and 1M steps:
-  final NOOP 1.35%, policy entropy 2.010 nats, reward +0.03015/step.
-- Pure PPO under the same harness: NOOP 1.20%, entropy 2.019, reward
-  +0.03095/step.  The two are effectively tied at 1M steps; the single-seed
-  differences are small and contradictory across metrics.
-- Neither method completes a tool recipe or reaches final tier > 0.
-- **No world-model mechanism advantage is demonstrated.**  TWM must not be the
-  headline mechanism on the strength of this result.
+- The original Pixels task remains a parity result at 1M: TWM and PPO were
+  effectively tied, while TWM was about 3x slower.
+- Reward shaping produced the clearest observed gap in reward and coverage.
+  Tier-positive counts are tied at 10/20. The evaluation uses a common seed
+  schedule but the harnesses do not produce trajectory-identical evaluations.
+- Short-episode Pixels showed no meaningful tier separation: TWM had tier>0
+  at 10/20 checkpoints and PPO at 4/20. PPO's final reward, coverage, and
+  entropy matched its baseline PPO run exactly. Treat this as noisy, weak
+  evidence rather than a demonstrated advantage.
+- Craftax-Classic-Symbolic-v1 is supported by Craftax and PPO; the current
+  TWM vision model only accepts 63x63x3 pixel observations, so the TWM side is
+  unsupported without changing its architecture.
+- The 50k/150k curriculum was implemented in project-local wrappers and both
+  agents completed 200k; neither reached tier > 0.
 
-What must still be re-argued before CMS-WM can be implemented:
+**Decision: Case A, provisionally.** Do not treat this calibration as proof
+that TWM is generally more sample-efficient. The next experiment is the full
+1M-step diagnosis on the exact reward-shaped Pixels task, using the aligned
+evaluation key schedule and reporting raw Craftax reward separately from the
+shaping bonus. Replicate the result across seeds before making a general
+advantage claim.
 
-1. Separate resource pickup from successful recipe completion.  Wood/sapling
-   changes were common (5-6% of eval transitions for both methods); a
-   completed tool recipe remained absent.
-2. Justify a world-model intervention against both a pure PPO control and a
-   repaired TWM control, not against the collapsed diagnostic policy.
-3. Treat the tokenizer/transformer attribution as unconfirmed.  A pure PPO
-   policy reached tier 0 without any world model.
-4. Define a recipe-level success metric and an offline prediction gate before
-   proposing closed-loop benefit.
-5. Demonstrate that the remaining failure is a WM representation or planning
-   problem rather than sparse reward, credit assignment, or a 1M-step budget.
+CMS-WM remains unimplemented. Any revision must use the shaped task's
+mechanics and causal evidence, and report raw Craftax reward separately from
+the +0.1 first-visit shaping bonus. The historical pre-calibration design
+draft below is retained for provenance, not as an implementation-ready method.
 
-If method work continues, start from the PPO control and target recipe-level
-credit assignment or explicit game-mechanic priors; do not claim a world-model
-advantage that the measurements do not show.
-
-Do not implement CMS-WM on the basis of the earlier diagnostic alone.
-
-Input evidence: `docs/diagnostic-results.md`, `docs/ppo-sanity-results.md`,
-`docs/twm-crash-diagnosis.md`, and the 1M-step JSON artifacts in
-`~/craftax-workspace/logs/`.
+Input evidence: `docs/task-calibration.md`, `docs/twm-crash-diagnosis.md`,
+the PPO results in `docs/ppo-sanity-results.md`, and JSON artifacts in
+`~/craftax-workspace/logs/calibration/`.
 
 This document proposes a **new domain-specific world model**, not an incremental loss or tokenizer tweak on top of the ICML TWM. The diagnosis first identifies which failures are real, then each proposed component is tied to one of those measurements.
 
@@ -249,16 +246,17 @@ Engineering estimate, **not measured**: 300-500 lines, +5-8 M parameters, +0.5-1
 | 2 | TFM | Final coverage was one tile; persistent topology is a clean, separable fix | Map memory cannot by itself stop a NOOP policy |
 | 3 | ERCM | Combat error is second and no kill outcome exists | Combat has even less outcome data; could be premature |
 
-**Recommendation on hold: do not build CMS-WM yet.** The pure PPO sanity
-control invalidated the earlier claim that the failure was primarily a
-TWM-specific rare-event problem.  First debug the TWM integration's policy
-collapse, quantify successful recipe transitions rather than raw inventory
-changes, and establish a pure PPO baseline that either explores adequately or
-shows a reproducible sample-budget limit.  Only after those controls may
-CMS-WM be re-argued as an offline prediction experiment.
+**Recommendation: hold implementation pending replication of the calibration
+candidate.** Reward-shaped Pixels is the only completed paired variant where
+the aligned final-10 TWM reward mean was clearly above PPO's (+0.05419 vs
++0.04249), but the comparison uses one training seed and the harnesses do not
+produce trajectory-identical evaluations. Run the 1M diagnostic on that same
+variant with the aligned evaluation key schedule, separating raw Craftax
+reward from shaping reward. CMS-WM must then be re-argued against that
+task-specific diagnosis and replicated across seeds.
 
 The earlier first gate (at least 1% labelled crafting events) was satisfied by
-pure PPO at 6.38%, yet recipe progression still failed.  That gate is therefore
+pure PPO at 6.38%, yet recipe progression still failed. That gate is
 insufficient and must be replaced by a cookbook-recipe success gate.
 
 ## 6. Why this fits IEEE Transactions on Games
@@ -279,5 +277,7 @@ supported as a method contribution without the new controls described above.
 - Data quoted in Sections 0-1: **command-verified** from the diagnostic JSON.
 - Architecture descriptions and module boundaries: **design proposal**, not implemented or measured.
 - Parameter/VRAM/time costs: **engineering estimates**, explicitly not measured.
-- Causal attribution to TWM's tokenizer or transformer: **not claimed**; the diagnostic supports only the observed association and the measured data-starvation mechanism.
+- Causal attribution to TWM's tokenizer or transformer: **not claimed**. The
+  original NOOP collapse came from an inverted PPO surrogate sign in the
+  harness and was corrected before this calibration.
 - Paper-anchor comparability: **unconfirmed**; the current harness differs from the official recipe.

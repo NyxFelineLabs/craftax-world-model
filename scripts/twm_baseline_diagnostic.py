@@ -56,6 +56,7 @@ import torch
 import torch.nn.functional as F
 
 from craftax.craftax_env import make_craftax_env_from_name
+from calibration_env import make_calibration_env
 
 from improving_transformers_world_model import Agent, WorldModel
 from improving_transformers_world_model.agent import (
@@ -206,6 +207,11 @@ class StableNearestNeighborTokenizer(NearestNeighborTokenizer):
 def parse_args():
     p = argparse.ArgumentParser(description="TWM Craftax baseline diagnostic")
     p.add_argument("--env", default="Craftax-Classic-Pixels-v1")
+    p.add_argument(
+        "--variant",
+        choices=("baseline", "reward_shaping", "short_episode", "curriculum"),
+        default="baseline",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-env-steps", type=int, default=1_000_000)
     p.add_argument("--envs", type=int, default=50, help="parallel envs")
@@ -213,6 +219,7 @@ def parse_args():
     p.add_argument("--checkpoint-every", type=int, default=10_000)
     p.add_argument("--eval-envs", type=int, default=8)
     p.add_argument("--eval-horizon", type=int, default=250)
+    p.add_argument("--eval-seed", type=int, default=4242)
     p.add_argument("--wm-batch", type=int, default=8)
     p.add_argument("--wm-time", type=int, default=8)
     p.add_argument("--wm-lr", type=float, default=1e-4)
@@ -231,6 +238,7 @@ def parse_args():
     p.add_argument("--holdout-max-steps", type=int, default=200_000)
     p.add_argument("--holdout-envs", type=int, default=32)
     p.add_argument("--holdout-only", action="store_true")
+    p.add_argument("--skip-holdout-eval", action="store_true")
     p.add_argument("--holdout-cache", default=str(DATA_DIR / "diagnostic_holdout.npz"))
     p.add_argument("--json-out", default=str(LOG_DIR / "twm_baseline_diagnostic.json"))
     p.add_argument("--ckpt-dir", default=str(CKPT_DIR))
@@ -239,8 +247,15 @@ def parse_args():
     return p.parse_args()
 
 
-def build_env(args):
-    env = make_craftax_env_from_name(args.env, auto_reset=True)
+def build_env(args, initial_env_steps=0, num_envs=None):
+    num_envs = args.envs if num_envs is None else num_envs
+    env = make_calibration_env(
+        args.env,
+        auto_reset=True,
+        variant=args.variant,
+        num_envs=num_envs,
+        initial_env_steps=initial_env_steps,
+    )
     params = env.default_params
     num_actions = int(env.action_space(params).n)
     obs_shape = tuple(env.observation_space(params).shape)
@@ -250,6 +265,8 @@ def build_env(args):
         raise SystemExit(f"expected 17 actions for Craftax-Classic, got {num_actions}")
 
     def compact_metrics(state, done):
+        if hasattr(state, "env_state"):
+            state = state.env_state
         inv = state.inventory
         inv_vec = jnp.stack([
             inv.wood, inv.stone, inv.coal, inv.iron, inv.diamond, inv.sapling,
@@ -572,7 +589,8 @@ def eval_policy(agent, args, step_batched, reset_batched, device, rng,
     rng, sub = jax.random.split(rng)
     obs, state = reset_batched(jax.random.split(sub, num_envs))
     visited = np.zeros((num_envs, 64, 64), dtype=bool)
-    mark_initial(visited, np.asarray(state.player_position))
+    env_state = state.env_state if hasattr(state, "env_state") else state
+    mark_initial(visited, np.asarray(env_state.player_position))
     coverage_peak = np.zeros(num_envs)
 
     prev = None
@@ -690,7 +708,8 @@ def collect_holdout(args, step_batched, reset_batched, device, seed=12345):
     rng, sub = jax.random.split(rng)
     obs, state = reset_batched(jax.random.split(sub, n_envs))
     visited = np.zeros((n_envs, 64, 64), dtype=bool)
-    mark_initial(visited, np.asarray(state.player_position))
+    env_state = state.env_state if hasattr(state, "env_state") else state
+    mark_initial(visited, np.asarray(env_state.player_position))
 
     pool = {b: [] for b in BUCKETS}
     prev_obs = None
@@ -854,8 +873,15 @@ def write_json(path, payload):
 
 def main():
     args = parse_args()
+    if "Symbolic" in args.env:
+        raise SystemExit(
+            "UNSUPPORTED: TWM WorldModel and Impala in this harness require "
+            "63x63x3 pixels; Craftax symbolic observations are flat vectors."
+        )
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if args.variant != "baseline" and args.holdout_cache == str(DATA_DIR / "diagnostic_holdout.npz"):
+        args.holdout_cache = str(DATA_DIR / f"diagnostic_holdout_{args.variant}.npz")
     ckpt_dir = pathlib.Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -877,6 +903,15 @@ def main():
 
     env, params, num_actions, step_batched, reset_batched = build_env(args)
     print(f"env obs=(63,63,3) actions={num_actions}", flush=True)
+
+    if args.variant == "curriculum":
+        _, _, _, eval_step_batched, eval_reset_batched = build_env(
+            args,
+            initial_env_steps=args.max_env_steps,
+            num_envs=args.eval_envs,
+        )
+    else:
+        eval_step_batched, eval_reset_batched = step_batched, reset_batched
 
     holdout = collect_holdout(args, step_batched, reset_batched, device)
     if args.holdout_only:
@@ -998,11 +1033,18 @@ def main():
         if env_steps >= next_ckpt:
             t_ck = time.perf_counter()
             print(f"\n--- checkpoint @ {env_steps} env steps ---", flush=True)
-            eval_rng = jax.random.PRNGKey(args.seed + 999)
-            mech = eval_policy(
-                agent, args, step_batched, reset_batched, device, eval_rng
+            eval_rng = jax.random.fold_in(
+                jax.random.PRNGKey(args.eval_seed), env_steps
             )
-            hold = evaluate_holdout(wm, holdout, device)
+            mech = eval_policy(
+                agent,
+                args,
+                eval_step_batched,
+                eval_reset_batched,
+                device,
+                eval_rng,
+            )
+            hold = None if args.skip_holdout_eval else evaluate_holdout(wm, holdout, device)
             wall = time.perf_counter() - start
             record = dict(
                 env_steps=env_steps,
@@ -1033,14 +1075,15 @@ def main():
                 f"entropy {mech['policy_entropy_mean']:.2f}",
                 flush=True,
             )
-            print(
-                "    holdout state loss: " + " | ".join(
-                    f"{b} {hold[b]['state_loss']:.3f} (n={hold[b]['n']})"
-                    if hold[b]['state_loss'] is not None else f"{b} n/a (n={hold[b]['n']})"
-                    for b in BUCKETS
-                ),
-                flush=True,
-            )
+            if hold is not None:
+                print(
+                    "    holdout state loss: " + " | ".join(
+                        f"{b} {hold[b]['state_loss']:.3f} (n={hold[b]['n']})"
+                        if hold[b]['state_loss'] is not None else f"{b} n/a (n={hold[b]['n']})"
+                        for b in BUCKETS
+                    ),
+                    flush=True,
+                )
             print(f"    ckpt wall {time.perf_counter()-t_ck:.1f}s\n", flush=True)
             next_ckpt = (env_steps // args.checkpoint_every + 1) * args.checkpoint_every
 

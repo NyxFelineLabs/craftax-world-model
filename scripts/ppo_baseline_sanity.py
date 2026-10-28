@@ -56,6 +56,7 @@ import jax
 import jax.numpy as jnp
 
 from craftax.craftax_env import make_craftax_env_from_name
+from calibration_env import make_calibration_env
 
 
 BASELINES_DIR = pathlib.Path(
@@ -100,6 +101,11 @@ class _CapturedScan(Exception):
 def parse_args():
     p = argparse.ArgumentParser(description="Pure PPO Craftax sanity baseline")
     p.add_argument("--env", default="Craftax-Classic-Pixels-v1")
+    p.add_argument(
+        "--variant",
+        choices=("baseline", "symbolic", "reward_shaping", "short_episode", "curriculum"),
+        default="baseline",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--total-timesteps", type=int, default=1_000_000)
     p.add_argument("--num-envs", type=int, default=500)
@@ -186,17 +192,33 @@ def capture_official_update(config, seed):
     return captured["step"], captured["init"]
 
 
-def build_eval_env(env_name):
-    env = make_craftax_env_from_name(env_name, auto_reset=True)
+def build_eval_env(
+    env_name,
+    variant="baseline",
+    num_envs=1,
+    initial_env_steps=0,
+):
+    env = make_calibration_env(
+        env_name,
+        auto_reset=True,
+        variant=variant,
+        num_envs=num_envs,
+        initial_env_steps=initial_env_steps,
+    )
     params = env.default_params
     num_actions = int(env.action_space(params).n)
     obs_shape = tuple(env.observation_space(params).shape)
-    if obs_shape != (63, 63, 3):
+    symbolic = "Symbolic" in env_name
+    if symbolic and len(obs_shape) != 1:
+        raise SystemExit(f"expected flat symbolic obs, got {obs_shape}")
+    if not symbolic and obs_shape != (63, 63, 3):
         raise SystemExit(f"expected (63,63,3) obs, got {obs_shape}")
     if num_actions != 17:
         raise SystemExit(f"expected 17 actions, got {num_actions}")
 
     def compact_metrics(state, done):
+        if hasattr(state, "env_state"):
+            state = state.env_state
         inv = state.inventory
         inv_vec = jnp.stack(
             [
@@ -328,7 +350,8 @@ def eval_policy(params, apply_fn, step_batched, reset_batched, rng, num_envs, ho
     obs, state = reset_batched(jax.random.split(reset_key, num_envs))
 
     visited = np.zeros((num_envs, 64, 64), dtype=bool)
-    mark_initial(visited, np.asarray(state.player_position))
+    env_state = state.env_state if hasattr(state, "env_state") else state
+    mark_initial(visited, np.asarray(env_state.player_position))
     coverage_peak = np.zeros(num_envs)
 
     prev = None
@@ -458,6 +481,35 @@ def main():
     args = parse_args()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     config = build_config(args)
+    if args.variant == "symbolic":
+        config["ENV_NAME"] = "Craftax-Classic-Symbolic-v1"
+    elif args.variant != "baseline":
+        config["ENV_NAME"] = "Craftax-Classic-Pixels-v1"
+
+    import ppo as craftax_ppo
+
+    env_variant = "baseline" if args.variant == "symbolic" else args.variant
+    craftax_ppo.make_craftax_env_from_name = lambda name, auto_reset: make_calibration_env(
+        name,
+        auto_reset=auto_reset,
+        variant=env_variant,
+        num_envs=args.num_envs,
+    )
+    if env_variant in ("curriculum", "reward_shaping"):
+        class PreserveCurriculumCounter:
+            def __init__(self, env):
+                self._env = env
+
+            def __getattr__(self, name):
+                return getattr(self._env, name)
+
+            def reset(self, key, params=None):
+                return self._env.reset(key, params)
+
+            def step(self, key, state, action, params=None):
+                return self._env.step(key, state, action, params)
+
+        craftax_ppo.AutoResetEnvWrapper = PreserveCurriculumCounter
 
     steps_per_update = args.num_envs * args.rollout_steps
     if args.total_timesteps % steps_per_update != 0:
@@ -471,7 +523,8 @@ def main():
         )
 
     print(
-        f"PPO sanity: env={args.env} seed={args.seed} steps={args.total_timesteps} "
+        f"PPO sanity: env={config['ENV_NAME']} variant={args.variant} "
+        f"seed={args.seed} steps={args.total_timesteps} "
         f"rollout={args.num_envs}x{args.rollout_steps}",
         flush=True,
     )
@@ -499,7 +552,14 @@ def main():
         )[0]
 
     chunk_fn = jax.jit(run_chunk)
-    step_batched, reset_batched, num_actions = build_eval_env(args.env)
+    step_batched, reset_batched, num_actions = build_eval_env(
+        config["ENV_NAME"],
+        env_variant,
+        num_envs=args.eval_envs,
+        initial_env_steps=(
+            args.total_timesteps if env_variant == "curriculum" else 0
+        ),
+    )
     if num_actions != 17:
         raise SystemExit(f"unexpected action count {num_actions}")
 
@@ -555,7 +615,8 @@ def main():
     final = checkpoints[-1]
     last10 = checkpoints[-10:]
     summary = {
-        "env": args.env,
+        "env": config["ENV_NAME"],
+        "variant": args.variant,
         "seed": args.seed,
         "requested_total_timesteps": args.total_timesteps,
         "actual_total_timesteps": env_steps,
